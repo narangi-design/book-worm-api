@@ -1,17 +1,15 @@
-from fastapi import FastAPI, HTTPException
-import psycopg2
-from dotenv import load_dotenv
-import os
-import hashlib
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from dotenv import load_dotenv
+import os
+
+from db import get_connection, get_data
+from auth import hash_password, create_access_token, get_current_user
 
 load_dotenv()
 
 app = FastAPI()
-
-def get_connection():
-    return psycopg2.connect(os.getenv('DATABASE_URL'))
 
 origins = os.getenv('ALLOWED_ORIGINS', 'http://localhost:5173').split(',')
 
@@ -22,22 +20,12 @@ app.add_middleware(
     allow_headers=['*'],
 )
 
-def get_data(table_name: str):
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(f'SELECT * FROM {table_name}')
-    columns = [desc[0] for desc in cursor.description]
-    rows = cursor.fetchall()
-    conn.close()
-    return [dict(zip(columns, row)) for row in rows]
+
+# --- Public endpoints ---
 
 @app.get('/api/books')
 def get_books():
     return get_data('books')
-
-@app.get('/api/members')
-def get_members():
-    return get_data('members')
 
 @app.get('/api/authors')
 def get_authors():
@@ -56,10 +44,14 @@ def get_award_votes():
     return get_data('award_votes')
 
 
-# --- Auth ---
+# --- Protected endpoints ---
 
-def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+@app.get('/api/members')
+def get_members(current_user: dict = Depends(get_current_user)):
+    return get_data('members')
+
+
+# --- Auth ---
 
 class LoginData(BaseModel):
     username: str
@@ -79,23 +71,27 @@ def login(data: LoginData):
     if not user:
         raise HTTPException(status_code=401, detail='Неверный логин или пароль')
 
-    return {'ok': True, 'user_id': user[0], 'name': user[1]}
+    token = create_access_token(user[0], user[1])
+    return {'access_token': token, 'token_type': 'bearer', 'user_id': user[0], 'name': user[1]}
+
+@app.get('/api/auth/me')
+def get_me(current_user: dict = Depends(get_current_user)):
+    return {'user_id': current_user['user_id'], 'name': current_user['name']}
 
 
 class UpdateAccountData(BaseModel):
-    user_id: int
     current_password: str
     new_username: str | None = None
     new_password: str | None = None
 
 @app.put('/api/auth/me')
-def update_account(data: UpdateAccountData):
+def update_account(data: UpdateAccountData, current_user: dict = Depends(get_current_user)):
     conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute(
         'SELECT id FROM users WHERE id = %s AND password_hash = %s',
-        (data.user_id, hash_password(data.current_password))
+        (current_user['user_id'], hash_password(data.current_password))
     )
     if not cursor.fetchone():
         conn.close()
@@ -111,11 +107,11 @@ def update_account(data: UpdateAccountData):
         params.append(hash_password(data.new_password))
 
     if updates:
-        params.append(data.user_id)
+        params.append(current_user['user_id'])
         cursor.execute(f'UPDATE users SET {", ".join(updates)} WHERE id = %s', params)
         conn.commit()
 
-    cursor.execute('SELECT id, username FROM users WHERE id = %s', (data.user_id,))
+    cursor.execute('SELECT id, username FROM users WHERE id = %s', (current_user['user_id'],))
     updated = cursor.fetchone()
     conn.close()
     return {'ok': True, 'user_id': updated[0], 'name': updated[1]}
