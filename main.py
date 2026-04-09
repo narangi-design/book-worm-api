@@ -3,6 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
+import math
+import random
+from datetime import date
 
 from db import get_connection, get_data
 from auth import hash_password, create_access_token, get_current_user
@@ -26,6 +29,67 @@ app.add_middleware(
 @app.get('/api/books')
 def get_books():
     return get_data('books')
+
+@app.get('/api/poll-candidates')
+def get_poll_candidates(n: int = 12):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        SELECT
+            b.id,
+            b.title,
+            b.author_id,
+            b.added_at,
+            COUNT(pv.id)                          AS appearances_count,
+            MAX(p.date)                           AS last_poll_date
+        FROM books b
+        LEFT JOIN poll_votes pv ON pv.book_id = b.id
+        LEFT JOIN polls p       ON p.id = pv.poll_id
+        WHERE b.status = 'to_read'
+        GROUP BY b.id
+    ''')
+    columns = [desc[0] for desc in cursor.description]
+    rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+    conn.close()
+
+    today = date.today()
+
+    def calc_weight(book: dict) -> float:
+        days_in_list = (today - book['added_at']).days if book['added_at'] else 1
+        days_since_poll = (
+            (today - book['last_poll_date']).days
+            if book['last_poll_date'] else days_in_list
+        )
+        appearances = book['appearances_count'] or 0
+
+        return (
+            math.sqrt(max(days_in_list, 1))
+            * math.sqrt(days_since_poll + 90)
+            / math.sqrt(1 + appearances)
+        )
+
+    weighted = sorted(
+        [{"book": b, "weight": calc_weight(b)} for b in rows],
+        key=lambda x: x["weight"],
+        reverse=True,
+    )
+
+    # Взвешенная выборка без повторений
+    pool = list(weighted)
+    selected = []
+    for _ in range(min(n, len(pool))):
+        total = sum(x["weight"] for x in pool)
+        r = random.uniform(0, total)
+        cumulative = 0
+        for i, item in enumerate(pool):
+            cumulative += item["weight"]
+            if cumulative >= r:
+                selected.append(item["book"])
+                pool.pop(i)
+                break
+
+    return selected
 
 @app.get('/api/authors')
 def get_authors():
