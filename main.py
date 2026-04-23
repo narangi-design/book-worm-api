@@ -1,4 +1,5 @@
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, Header
+from mangum import Mangum
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -203,3 +204,6 @@ def update_account(data: UpdateAccountData, current_user: dict = Depends(get_cur
     updated = cursor.fetchone()
     conn.close()
     return {'ok': True, 'user_id': updated[0], 'name': updated[1]}
+
+
+handler = Mangum(app)
